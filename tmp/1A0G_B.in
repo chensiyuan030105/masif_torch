@@ -1,0 +1,27 @@
+read
+    mol pqr 1A0G_B
+end
+elec 
+    mg-auto
+    dime 161 129 161
+    cglen 110.3079 78.0810 97.7772
+    fglen 84.8870 65.9300 77.5160
+    cgcent mol 1
+    fgcent mol 1
+    mol 1
+    lpbe
+    bcfl sdh
+    pdie 2.0000
+    sdie 78.5400
+    srfm smol
+    chgm spl2
+    sdens 10.00
+    srad 1.40
+    swin 0.30
+    temp 298.15
+    calcenergy total
+    calcforce no
+    write pot dx 1A0G_B
+end
+print elecEnergy 1 end
+quit
