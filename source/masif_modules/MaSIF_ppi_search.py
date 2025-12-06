@@ -1,329 +1,264 @@
-import tensorflow as tf
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 
-
-class MaSIF_ppi_search:
+class MaSIF_ppi_search(nn.Module):
 
     """
     The neural network model to classify two patches into binders or not binders. 
     """
-
-    def count_number_parameters(self):
-        total_parameters = 0
-        for variable in tf.trainable_variables():
-            # shape is an array of tf.Dimension
-            shape = variable.get_shape()
-            print(variable)
-            variable_parameters = 1
-            for dim in shape:
-                variable_parameters *= dim.value
-            print(variable_parameters)
-            total_parameters += variable_parameters
-        print("Total number parameters: %d" % total_parameters)
-
-    def frobenius_norm(self, tensor):
-        square_tensor = tf.square(tensor)
-        tensor_sum = tf.reduce_sum(square_tensor)
-        frobenius_norm = tf.sqrt(tensor_sum)
-        return frobenius_norm
-
-    def build_sparse_matrix_softmax(self, idx_non_zero_values, X, dense_shape_A):
-        A = tf.SparseTensorValue(idx_non_zero_values, tf.squeeze(X), dense_shape_A)
-        A = tf.sparse_reorder(A)  # n_edges x n_edges
-        A = tf.sparse_softmax(A)
-
-        return A
-
-    def compute_initial_coordinates(self):
-        range_rho = [0.0, self.max_rho]
-        range_theta = [0, 2 * np.pi]
-
-        grid_rho = np.linspace(range_rho[0], range_rho[1], num=self.n_rhos + 1)
-        grid_rho = grid_rho[1:]
-        grid_theta = np.linspace(range_theta[0], range_theta[1], num=self.n_thetas + 1)
-        grid_theta = grid_theta[:-1]
-
-        grid_rho_, grid_theta_ = np.meshgrid(grid_rho, grid_theta, sparse=False)
-        grid_rho_ = (
-            grid_rho_.T
-        )  # the traspose here is needed to have the same behaviour as Matlab code
-        grid_theta_ = (
-            grid_theta_.T
-        )  # the traspose here is needed to have the same behaviour as Matlab code
-        grid_rho_ = grid_rho_.flatten()
-        grid_theta_ = grid_theta_.flatten()
-
-        coords = np.concatenate((grid_rho_[None, :], grid_theta_[None, :]), axis=0)
-        coords = coords.T  # every row contains the coordinates of a grid intersection
-        print(coords.shape)
-        return coords
-
-    def inference(
-        self,
-        input_feat,
-        rho_coords,
-        theta_coords,
-        mask,
-        W_conv,
-        b_conv,
-        mu_rho,
-        sigma_rho,
-        mu_theta,
-        sigma_theta,
-        eps=1e-5,
-        mean_gauss_activation=True,
-    ):
-        n_samples = tf.shape(rho_coords)[0]
-        n_vertices = tf.shape(rho_coords)[1]
-        # n_feat = input_feat.get_shape().as_list()[2]
-
-        all_conv_feat = []
-        for k in range(self.n_rotations):
-            rho_coords_ = tf.reshape(rho_coords, [-1, 1])  # batch_size*n_vertices
-            thetas_coords_ = tf.reshape(theta_coords, [-1, 1])  # batch_size*n_vertices
-
-            thetas_coords_ += k * 2 * np.pi / self.n_rotations
-            thetas_coords_ = tf.mod(thetas_coords_, 2 * np.pi)
-            rho_coords_ = tf.exp(
-                -tf.square(rho_coords_ - mu_rho) / (tf.square(sigma_rho) + eps)
-            )
-            thetas_coords_ = tf.exp(
-                -tf.square(thetas_coords_ - mu_theta) / (tf.square(sigma_theta) + eps)
-            )
-
-            gauss_activations = tf.multiply(
-                rho_coords_, thetas_coords_
-            )  # batch_size*n_vertices, n_gauss
-            gauss_activations = tf.reshape(
-                gauss_activations, [n_samples, n_vertices, -1]
-            )  # batch_size, n_vertices, n_gauss
-            gauss_activations = tf.multiply(gauss_activations, mask)
-            if (
-                mean_gauss_activation
-            ):  # computes mean weights for the different gaussians
-                gauss_activations /= (
-                    tf.reduce_sum(gauss_activations, 1, keep_dims=True) + eps
-                )  # batch_size, n_vertices, n_gauss
-
-            gauss_activations = tf.expand_dims(
-                gauss_activations, 2
-            )  # batch_size, n_vertices, 1, n_gauss,
-            input_feat_ = tf.expand_dims(
-                input_feat, 3
-            )  # batch_size, n_vertices, n_feat, 1
-
-            gauss_desc = tf.multiply(
-                gauss_activations, input_feat_
-            )  # batch_size, n_vertices, n_feat, n_gauss,
-            gauss_desc = tf.reduce_sum(gauss_desc, 1)  # batch_size, n_feat, n_gauss,
-            gauss_desc = tf.reshape(
-                gauss_desc, [n_samples, self.n_thetas * self.n_rhos]
-            )  # batch_size, 80
-
-            conv_feat = tf.matmul(gauss_desc, W_conv) + b_conv  # batch_size, 80
-            all_conv_feat.append(conv_feat)
-        all_conv_feat = tf.stack(all_conv_feat)
-        conv_feat = tf.reduce_max(all_conv_feat, 0)
-        conv_feat = tf.nn.relu(conv_feat)
-        return conv_feat
-
-    # Softmax cross entropy
-    def compute_data_loss_cross_entropy(self, pos, neg):
-        epsilon = tf.constant(value=0.00001)
-        logit = tf.nn.softmax([pos, neg])
-        self.softmax_debug = logit
-        cross_entropy = -(tf.log(logit[1] + epsilon) - tf.log(logit[0] + epsilon))
-        return cross_entropy
-
-    # Data loss
-    # Values above 10 are ignored.
-    def compute_data_loss(self, pos_thresh=0.0, neg_thresh=10):
-        self.global_desc_pos = tf.gather(self.global_desc, tf.range(0, self.n_patches))
-        self.global_desc_binder = tf.gather(
-            self.global_desc, tf.range(self.n_patches, 2 * self.n_patches)
-        )
-        self.global_desc_neg = tf.gather(
-            self.global_desc, tf.range(2 * self.n_patches, 3 * self.n_patches)
-        )
-        self.global_desc_neg_2 = tf.gather(
-            self.global_desc, tf.range(3 * self.n_patches, 4 * self.n_patches)
-        )
-
-        pos_distances = tf.reduce_sum(
-            tf.square(self.global_desc_binder - self.global_desc_pos), 1
-        )
-        neg_distances = tf.reduce_sum(
-            tf.square(self.global_desc_neg - self.global_desc_neg_2), 1
-        )
-        self.score = tf.concat([pos_distances, neg_distances], axis=0)
-        pos_distances = tf.nn.relu(
-            tf.reduce_sum(tf.square(self.global_desc_binder - self.global_desc_pos), 1)
-            - pos_thresh
-        )
-        neg_distances = tf.nn.relu(
-            -tf.reduce_sum(tf.square(self.global_desc_neg - self.global_desc_neg_2), 1)
-            + neg_thresh
-        )
-
-        pos_mean, pos_std = tf.nn.moments(pos_distances, [0])
-        neg_mean, neg_std = tf.nn.moments(neg_distances, [0])
-        data_loss = pos_std + neg_std + pos_mean + neg_mean
-
-        return data_loss
 
     def __init__(
         self,
         max_rho,
         n_thetas=16,
         n_rhos=5,
-        n_gamma=1.0,
-        learning_rate=1e-3,
         n_rotations=16,
-        idx_gpu="/device:GPU:0",
-        feat_mask=[1.0, 1.0, 1.0, 1.0, 1.0],
+        feat_mask=(1.0, 1.0, 1.0, 1.0, 1.0),
+        device=None,
+        eps=1e-5,
     ):
-
-        # order of the spectral filters
+        super().__init__()
+        self.device = device
         self.max_rho = max_rho
         self.n_thetas = n_thetas
         self.n_rhos = n_rhos
-
         self.sigma_rho_init = (
             max_rho / 8
         )  # in MoNet was 0.005 with max radius=0.04 (i.e. 8 times smaller)
         self.sigma_theta_init = 1.0  # 0.25
         self.n_rotations = n_rotations
         self.n_feat = int(sum(feat_mask))
+        self.n_labels = 2
+        self.eps = eps
+        
+        initial_coords = self.compute_initial_coordinates()  # shape (n_gauss, 2)
+        mu_rho_initial = torch.tensor(initial_coords[:, 0], dtype=torch.float32).unsqueeze(0).to(self.device).to(torch.float64)
+        mu_theta_initial = torch.tensor(initial_coords[:, 1], dtype=torch.float32).unsqueeze(0).to(self.device).to(torch.float64)
 
-        with tf.Graph().as_default() as g:
-            self.graph = g
-            tf.set_random_seed(0)
-            with tf.device(idx_gpu):
+        self.mu_rho = nn.ParameterList()
+        self.mu_theta = nn.ParameterList()
+        self.sigma_rho = nn.ParameterList()
+        self.sigma_theta = nn.ParameterList()
 
-                initial_coords = self.compute_initial_coordinates()
-                mu_rho_initial = np.expand_dims(initial_coords[:, 0], 0).astype(
-                    "float32"
+        for i in range(self.n_feat):
+            setattr(self, f"mu_rho_{i}", nn.Parameter(mu_rho_initial.clone()))
+            setattr(self, f"mu_theta_{i}", nn.Parameter(mu_theta_initial.clone()))
+            setattr(self, f"sigma_rho_{i}", nn.Parameter(torch.ones_like(mu_rho_initial) * self.sigma_rho_init))
+            setattr(self, f"sigma_theta_{i}", nn.Parameter(torch.ones_like(mu_theta_initial) * self.sigma_theta_init))
+            
+        self.global_desc = []
+
+        for i in range(self.n_feat):
+            b_conv = torch.zeros(
+                self.n_thetas * self.n_rhos,
+                device=self.device,
+                dtype=torch.float64
+            )
+            setattr(self, f"b_conv_{i}", nn.Parameter(b_conv))
+
+        for i in range(self.n_feat):
+            W_conv = torch.empty(
+                self.n_thetas * self.n_rhos, self.n_thetas * self.n_rhos,
+                device=self.device, dtype=torch.float64
+            )
+            nn.init.xavier_uniform_(W_conv)
+            W_conv = nn.Parameter(W_conv)
+            setattr(self, f"W_conv_{i}", W_conv)
+
+        self.fully_connected = torch.nn.Linear(
+            self.n_thetas * self.n_rhos * self.n_feat,  # in_features
+            self.n_thetas * self.n_rhos                 # out_features
+        ).to(self.device).to(torch.float64)
+
+    # --------------------------
+    # Utilities
+    # --------------------------
+    @staticmethod
+    def compute_initial_coordinates_static(n_thetas, n_rhos, max_rho):
+        range_rho = [0.0, max_rho]
+        range_theta = [0, 2 * math.pi]
+        grid_rho = [range_rho[0] + (i + 1) * (range_rho[1] - range_rho[0]) / n_rhos for i in range(n_rhos)]
+        grid_theta = [range_theta[0] + i * (range_theta[1] - range_theta[0]) / n_thetas for i in range(n_thetas)]
+        coords = []
+        for t in grid_theta:
+            for r in grid_rho:
+                coords.append((r, t))
+        import numpy as _np
+
+        return _np.array(coords, dtype=_np.float32)  # (n_gauss, 2)
+
+    def compute_initial_coordinates(self):
+        return self.compute_initial_coordinates_static(self.n_thetas, self.n_rhos, self.max_rho)
+
+    def count_number_parameters(self):
+        total = sum(p.numel() for p in self.parameters())
+        print(f"Total number parameters: {total}")
+        return total
+
+    def frobenius_norm(self, tensor: torch.Tensor):
+        return torch.sqrt(torch.sum(tensor * tensor))
+
+    # --------------------------
+    # Core inference block (per-spec equivalent of TF inference function)
+    # --------------------------
+    def inference(self, rho_coords, theta_coords, feat, mask, W_conv, b_conv, mu_rho, sigma_rho, mu_theta, sigma_theta, mean_gauss_activation=True):
+
+        n_samples = rho_coords.shape[0]   # batch size
+        n_vertices = rho_coords.shape[1]  # number of surface points (vertices)
+        n_feat = feat.shape[2]      # number of input features
+
+        all_conv_feat = []
+
+        # Convert all tensors to float64 (double precision)
+        rho_coords = rho_coords.to(self.device).to(torch.float64)
+        theta_coords = theta_coords.to(self.device).to(torch.float64)
+        feat = feat.to(self.device).to(torch.float64)
+        mask = mask.to(self.device).to(torch.float64)
+        W_conv = W_conv.to(self.device).to(torch.float64)
+        b_conv = b_conv.to(self.device).to(torch.float64)
+        mu_rho = mu_rho.to(self.device).to(torch.float64)
+        sigma_rho = sigma_rho.to(self.device).to(torch.float64)
+        mu_theta = mu_theta.to(self.device).to(torch.float64)
+        sigma_theta = sigma_theta.to(self.device).to(torch.float64)
+
+        for k in range(self.n_rotations):
+            # Flatten rho and theta coordinates: [batch_size * n_vertices, 1]
+            rho_coords_ = rho_coords.reshape(-1, 1)
+            thetas_coords_ = theta_coords.reshape(-1, 1)
+
+            # Apply rotation on theta
+            thetas_coords_ += k * 2 * math.pi / self.n_rotations
+            thetas_coords_ = torch.remainder(thetas_coords_, 2 * math.pi)
+
+            # Gaussian activation on rho and theta
+            rho_coords_ = torch.exp(
+                -torch.pow(rho_coords_ - mu_rho, 2) / (torch.pow(sigma_rho, 2) + self.eps)
+            )
+            thetas_coords_ = torch.exp(
+                -torch.pow(thetas_coords_ - mu_theta, 2) / (torch.pow(sigma_theta, 2) + self.eps)
+            )
+
+            # Element-wise product: [batch_size*n_vertices, n_gauss]
+            gauss_activations = rho_coords_ * thetas_coords_
+            gauss_activations = gauss_activations.reshape(n_samples, n_vertices, -1)
+
+            # Apply mask
+            gauss_activations = gauss_activations * mask
+
+            # Normalize activations if needed
+            if mean_gauss_activation:
+                gauss_activations = gauss_activations / (
+                    torch.sum(gauss_activations, dim=1, keepdim=True) + self.eps
                 )
-                mu_theta_initial = np.expand_dims(initial_coords[:, 1], 0).astype(
-                    "float32"
-                )
-                self.mu_rho = []
-                self.mu_theta = []
-                self.sigma_rho = []
-                self.sigma_theta = []
-                for i in range(self.n_feat):
-                    self.mu_rho.append(
-                        tf.Variable(mu_rho_initial, name="mu_rho_{}".format(i))
-                    )  # 1, n_gauss
-                    self.mu_theta.append(
-                        tf.Variable(mu_theta_initial, name="mu_theta_{}".format(i))
-                    )  # 1, n_gauss
-                    self.sigma_rho.append(
-                        tf.Variable(
-                            np.ones_like(mu_rho_initial) * self.sigma_rho_init,
-                            name="sigma_rho_{}".format(i),
-                        )
-                    )  # 1, n_gauss
-                    self.sigma_theta.append(
-                        tf.Variable(
-                            (np.ones_like(mu_theta_initial) * self.sigma_theta_init),
-                            name="sigma_theta_{}".format(i),
-                        )
-                    )  # 1, n_gauss
 
-                self.keep_prob = tf.placeholder(tf.float32)
-                # **Features for binder should be flipped before feeding to the NN.
-                self.rho_coords = tf.placeholder(
-                    tf.float32, shape=[None, None, 1]
-                )  # batch_size, n_vertices, 1
-                self.theta_coords = tf.placeholder(
-                    tf.float32, shape=[None, None, 1]
-                )  # batch_size, n_vertices, 1
-                self.input_feat = tf.placeholder(
-                    tf.float32, shape=[None, None, self.n_feat]
-                )  # batch_size, n_vertices, n_feat
-                self.mask = tf.placeholder(
-                    tf.float32, shape=[None, None, 1]
-                )  # batch_size, n_vertices, 1
+            # Expand dimensions for broadcasting
+            gauss_activations = gauss_activations.unsqueeze(2)  # [B, V, 1, n_gauss]
+            feat_ = feat.unsqueeze(3)               # [B, V, n_feat, 1]
 
-                self.global_desc = []
+            # Multiply features with activations and aggregate
+            gauss_desc = gauss_activations * feat_
+            gauss_desc = torch.sum(gauss_desc, dim=1)  # [B, n_feat, n_gauss]
+            gauss_desc = gauss_desc.reshape(n_samples, self.n_thetas * self.n_rhos * n_feat)
 
-                # Initialize b_conv for each feature.
-                b_conv = []
-                for i in range(self.n_feat):
-                    b_conv.append(
-                        tf.Variable(
-                            tf.zeros([self.n_thetas * self.n_rhos]),
-                            name="b_conv_{}".format(i),
-                        )
-                    )
-                # Run the inference layer per feature.
-                for i in range(self.n_feat):
-                    my_input_feat = tf.expand_dims(self.input_feat[:, :, i], 2)
+            # Linear transformation: [B, n_gauss]
+            conv_feat = torch.matmul(gauss_desc, W_conv) + b_conv
+            all_conv_feat.append(conv_feat)
 
-                    W_conv = tf.get_variable(
-                        "W_conv_{}".format(i),
-                        shape=[
-                            self.n_thetas * self.n_rhos,
-                            self.n_thetas * self.n_rhos,
-                        ],
-                        initializer=tf.contrib.layers.xavier_initializer(),
-                    )
+        # Max-pooling over rotations
+        all_conv_feat = torch.stack(all_conv_feat, dim=0)  # [n_rotations, B, n_gauss]
+        conv_feat, _ = torch.max(all_conv_feat, dim=0)     # [B, n_gauss]
+        conv_feat = F.relu(conv_feat)
 
-                    desc = self.inference(
-                        my_input_feat,
-                        self.rho_coords,
-                        self.theta_coords,
-                        self.mask,
-                        W_conv,
-                        b_conv[i],
-                        self.mu_rho[i],
-                        self.sigma_rho[i],
-                        self.mu_theta[i],
-                        self.sigma_theta[i],
-                    )  # batch_size, n_gauss*1
+        return conv_feat
 
-                    self.global_desc.append(desc)
+    # Data loss
+    # Values above 10 are ignored.
+    def compute_data_loss(self, pos_thresh=0.0, neg_thresh=10.0):
+        # Split global descriptors into 4 parts
+        self.global_desc_pos = self.global_desc[0:self.n_patches]
+        self.global_desc_binder = self.global_desc[self.n_patches:2*self.n_patches]
+        self.global_desc_neg = self.global_desc[2*self.n_patches:3*self.n_patches]
+        self.global_desc_neg_2 = self.global_desc[3*self.n_patches:4*self.n_patches]
 
-                # global_desc is [n_feat, batch_size, self.n_thetas*self.n_rhos].
-                self.global_desc = tf.stack(self.global_desc, axis=1)  #
-                self.global_desc = tf.reshape(
-                    self.global_desc, [-1, self.n_thetas * self.n_rhos * self.n_feat]
-                )
+        # Compute squared distances
+        pos_distances = torch.sum((self.global_desc_binder - self.global_desc_pos) ** 2, dim=1)
+        neg_distances = torch.sum((self.global_desc_neg - self.global_desc_neg_2) ** 2, dim=1)
 
-                # Refine global_desc with a FC layer.
-                self.global_desc = tf.contrib.layers.fully_connected(
-                    self.global_desc,
-                    self.n_thetas * self.n_rhos,
-                    activation_fn=tf.identity,
-                )  # batch_size, n_thetas
+        # Store scores (optional, for monitoring)
+        self.score = torch.cat([pos_distances, neg_distances], dim=0)
 
-                # compute data loss
-                self.n_patches = tf.shape(self.global_desc)[0] // 4
-                self.data_loss = self.compute_data_loss()
+        # Apply thresholds and ReLU
+        pos_distances = F.relu(pos_distances - pos_thresh)
+        neg_distances = F.relu(-neg_distances + neg_thresh)
 
-                # definition of the solver
-                self.optimizer = tf.train.AdamOptimizer(
-                    learning_rate=learning_rate
-                ).minimize(self.data_loss)
+        # Compute mean and std
+        pos_mean = torch.mean(pos_distances)
+        pos_std = torch.std(pos_distances, unbiased=False)
+        neg_mean = torch.mean(neg_distances)
+        neg_std = torch.std(neg_distances, unbiased=False)
 
-                self.var_grad = tf.gradients(self.data_loss, tf.trainable_variables())
-                # print self.var_grad
-                for k in range(len(self.var_grad)):
-                    if self.var_grad[k] is None:
-                        print(tf.trainable_variables()[k])
-                self.norm_grad = self.frobenius_norm(
-                    tf.concat([tf.reshape(g, [-1]) for g in self.var_grad], 0)
-                )
+        # Final data loss
+        data_loss = pos_mean + pos_std + neg_mean + neg_std
 
-                # Create a session for running Ops on the Graph.
-                config = tf.ConfigProto(allow_soft_placement=True)
-                config.gpu_options.allow_growth = True
-                self.session = tf.Session(config=config)
-                self.saver = tf.train.Saver()
+        return data_loss
 
-                # Run the Op to initialize the variables.
-                init = tf.global_variables_initializer()
-                self.session.run(init)
-                self.count_number_parameters()
+    # --------------------------
+    # Forward: corresponds to entire pipeline until full_score
+    # --------------------------
+    def forward(self, rho, theta, feat, mask, keep_prob=None):
+        
+        self.global_desc = []
+        initial_coords = self.compute_initial_coordinates()  # shape (n_gauss, 2)
+        mu_rho_initial = torch.tensor(initial_coords[:, 0], dtype=torch.float32).unsqueeze(0)
+        mu_theta_initial = torch.tensor(initial_coords[:, 1], dtype=torch.float32).unsqueeze(0)
+
+        for i in range(self.n_feat):
+            # Extract the i-th feature channel and add an extra dimension at axis=2
+            my_feat = feat[:, :, i].unsqueeze(2)  # equivalent to tf.expand_dims(..., 2)
+
+            # Retrieve the corresponding learnable parameters for feature i
+            W_conv = getattr(self, f"W_conv_{i}")
+            b_conv = getattr(self, f"b_conv_{i}")
+            mu_rho = getattr(self, f"mu_rho_{i}")
+            sigma_rho = getattr(self, f"sigma_rho_{i}")
+            mu_theta = getattr(self, f"mu_theta_{i}")
+            sigma_theta = getattr(self, f"sigma_theta_{i}")
+
+            # Apply the inference function to compute the output descriptor
+            out = self.inference(
+                rho,
+                theta,
+                my_feat,
+                mask,
+                W_conv,
+                b_conv,
+                mu_rho,
+                sigma_rho,
+                mu_theta,
+                sigma_theta
+            )
+
+            # Store the descriptor for this feature channel
+            self.global_desc.append(out)
+
+        self.global_desc = torch.stack(self.global_desc, dim=1)  # [B, n_rotations, ...]
+        self.global_desc_stack = self.global_desc
+
+        # Flatten to [B, n_thetas * n_rhos * n_feat]
+        self.global_desc = self.global_desc.reshape(
+            -1, self.n_thetas * self.n_rhos * self.n_feat
+        )
+
+        self.global_desc_reshape = self.global_desc
+
+        self.global_desc = self.fully_connected(self.global_desc)
+
+        # Compute loss
+        self.n_patches = self.global_desc.shape[0] // 4
+        self.data_loss = self.compute_data_loss()
+
+        return self.global_desc, self.data_loss, self.score
 

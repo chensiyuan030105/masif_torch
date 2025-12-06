@@ -4,8 +4,8 @@ end
 elec 
     mg-auto
     dime 161 129 161
-    cglen 110.3079 78.0810 97.7772
-    fglen 84.8870 65.9300 77.5160
+    cglen 110.3062 78.0810 97.6395
+    fglen 84.8860 65.9300 77.4350
     cgcent mol 1
     fgcent mol 1
     mol 1

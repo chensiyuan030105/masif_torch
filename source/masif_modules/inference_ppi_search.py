@@ -7,6 +7,7 @@ import os
 from IPython.core.debugger import set_trace
 from sklearn.metrics import accuracy_score, roc_auc_score
 import torch
+from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -92,42 +93,16 @@ def log_indices(name, arr, logfile, sample_count=5):
         logfile.write(f"       [WARNING] {name} is empty\n")
 
 # Randomly pick
-def train_ppi_search(
+def inference_ppi_search(
     model,
     params,
-    optimizer,
-    train_dataloader,
-    val_dataloader,
-    test_dataloader,
-    wandb=None,
+    test_dataloader
 ):
 
-    num_epochs          = params["num_epochs"]
-    save_epoch          = params["save_epoch"]
-    out_dir             = params["model_dir"]
-    
-    log_path = os.path.join(out_dir, "log.txt")
-    logfile = open(log_path, "w") 
-
-    model.train()
-
-    # ---- put this right after wandb.init(...) ----
-    wandb.define_metric("global_step")
-    wandb.define_metric("epoch")
-
-    # loss vs step
-    wandb.define_metric("train/loss_step", step_metric="global_step")
-
-    # loss vs epoch (log once per epoch)
-    wandb.define_metric("train/loss_epoch", step_metric="epoch")
-
-    global_step = 0
-
-    for epoch in range(num_epochs + 1):  # num_epochs = params["epoch"] or whatever you use
-        epoch_loss_sum = 0.0
-        epoch_batches = 0
-
-        for step_in_epoch, batch in enumerate(train_dataloader):
+    model.eval()
+    results = []  # each item: {"desc": ..., "loss": ..., "score": ...}
+    with torch.no_grad():
+        for batch in tqdm(test_dataloader):
             (binder_rho, binder_theta, binder_feat, binder_mask,
             pos_rho, pos_theta, pos_feat, pos_mask,
             neg_rho, neg_theta, neg_feat, neg_mask) = batch
@@ -155,6 +130,7 @@ def train_ppi_search(
             )
 
             keep_prob = 0.5
+
             desc, loss, score = model(
                 rho=batch_rho,
                 theta=batch_theta,
@@ -163,106 +139,11 @@ def train_ppi_search(
                 keep_prob=keep_prob
             )
 
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            # store (move to cpu so list doesn't hold GPU memory)
+            results.append({
+                "desc":  desc.detach().cpu(),
+                "loss":  loss.detach().cpu() if torch.is_tensor(loss) else loss,
+                "score": score.detach().cpu() if torch.is_tensor(score) else score,
+            })
 
-            loss_val = float(loss.detach().cpu().item())
-
-            # ---- per-step logging (x-axis = global_step) ----
-            wandb.log(
-                {
-                    "train/loss_step": loss_val,
-                    "epoch": epoch,
-                    "step_in_epoch": step_in_epoch,
-                    "global_step": global_step,
-                },
-                step=global_step,
-            )
-
-            epoch_loss_sum += loss_val
-            epoch_batches += 1
-            global_step += 1
-
-        # ---- per-epoch logging (x-axis = epoch) ----
-        if epoch_batches > 0:
-            wandb.log(
-                {
-                    "train/loss_epoch": epoch_loss_sum / epoch_batches,
-                    "epoch": epoch,
-                    "global_step": global_step,  # optional, handy for reference
-                }
-            )
-
-
-
-        if epoch % save_epoch == 0:
-            model.eval()
-
-            for batch in test_dataloader:
-                (binder_rho, binder_theta, binder_feat, binder_mask,
-                pos_rho, pos_theta, pos_feat, pos_mask,
-                neg_rho, neg_theta, neg_feat, neg_mask) = batch
-
-                # ---- to device ----
-                binder_rho   = binder_rho.to(device, non_blocking=True)
-                binder_theta = binder_theta.to(device, non_blocking=True)
-                binder_feat  = binder_feat.to(device, non_blocking=True)
-                binder_mask  = binder_mask.to(device, non_blocking=True)
-
-                pos_rho   = pos_rho.to(device, non_blocking=True)
-                pos_theta = pos_theta.to(device, non_blocking=True)
-                pos_feat  = pos_feat.to(device, non_blocking=True)
-                pos_mask  = pos_mask.to(device, non_blocking=True)
-
-                neg_rho   = neg_rho.to(device, non_blocking=True)
-                neg_theta = neg_theta.to(device, non_blocking=True)
-                neg_feat  = neg_feat.to(device, non_blocking=True)
-                neg_mask  = neg_mask.to(device, non_blocking=True)
-
-                batch_rho, batch_theta, batch_feat, batch_mask = construct_batch(
-                    binder_rho, binder_theta, binder_feat, binder_mask,
-                    pos_rho, pos_theta, pos_feat, pos_mask,
-                    neg_rho, neg_theta, neg_feat, neg_mask,
-                )
-
-                keep_prob = 0.5
-
-                desc, loss, score = model(
-                    rho=batch_rho,
-                    theta=batch_theta,
-                    feat=batch_feat,
-                    mask=batch_mask,
-                    keep_prob=keep_prob
-                )
-
-                desc = desc.detach().cpu().numpy()
-
-                n_patches = desc.shape[0] // 4
-                pos_desc = desc[0:n_patches]
-                binder_desc = desc[n_patches:2*n_patches]
-                neg_desc = desc[2*n_patches:3*n_patches]
-                neg_desc_2 = desc[3*n_patches:4*n_patches]
-
-                # Compute val ROC AUC.
-                pos_dists = compute_dists(pos_desc, binder_desc)
-                neg_dists = compute_dists(neg_desc, neg_desc_2)
-                roc_auc = 1 - compute_roc_auc(pos_dists, neg_dists)
-
-                logfile.write("Iteration {} validation roc auc: {}\n".format(epoch, roc_auc))
-                logfile.write("Mean validation positive score: {} ".format(np.mean(pos_dists)))
-                logfile.write("Mean validation negative score: {} ".format(np.mean(neg_dists)))
-                logfile.flush()
-
-            logfile.write(">>> Saving model.\n")
-            print(">>> Saving model.")
-
-            output_model = os.path.join(out_dir, f"model_epoch_{epoch}.pt")
-            torch.save(model.state_dict(), output_model)
-            msg = f">>> Epoch {epoch}: Saved model and test results.\n"
-            logfile.write(msg)
-            print(msg)
-
-            model.train()
-
-    wandb.finish()
+    return results
