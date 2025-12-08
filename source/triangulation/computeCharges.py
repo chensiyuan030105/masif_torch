@@ -9,7 +9,7 @@ This file is part of MaSIF.
 Released under an Apache License 2.0
 """
 
-from default_config.chemistry import (
+from ..default_config.chemistry import (
     polarHydrogens,
     radii,
     acceptorAngleAtom,

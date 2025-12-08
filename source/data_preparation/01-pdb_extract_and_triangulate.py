@@ -5,22 +5,20 @@ import shutil
 import argparse
 import yaml
 import numpy as np
-
-from IPython.core.debugger import set_trace
-
-# Local includes (unchanged)
-from triangulation.computeMSMS import computeMSMS
-from triangulation.fixmesh import fix_mesh
 import pymesh
-from input_output.extractPDB import extractPDB
-from input_output.save_ply import save_ply
-from input_output.protonate import protonate
-from triangulation.computeHydrophobicity import computeHydrophobicity
-from triangulation.computeCharges import computeCharges, assignChargesToNewMesh
-from triangulation.computeAPBS import computeAPBS
-from triangulation.compute_normal import compute_normal
+from IPython.core.debugger import set_trace
 from sklearn.neighbors import KDTree
 
+# Local includes (unchanged)
+from ..triangulation.computeMSMS import computeMSMS
+from ..triangulation.fixmesh import fix_mesh
+from ..triangulation.computeHydrophobicity import computeHydrophobicity
+from ..triangulation.computeCharges import computeCharges, assignChargesToNewMesh
+from ..triangulation.computeAPBS import computeAPBS
+from ..triangulation.compute_normal import compute_normal
+from ..input_output.extractPDB import extractPDB
+from ..input_output.save_ply import save_ply
+from ..input_output.protonate import protonate
 
 def load_config(path: str) -> dict:
     """Load YAML config and do a small amount of compatibility handling."""
@@ -131,11 +129,8 @@ def process_one_chain(cfg: dict, pdb_id: str, chain_id: str, force: bool = False
 
     # Protonate into tmp (keep per-pdb file to reuse)
     protonated_file = os.path.join(tmp_dir, f"{pdb_id.upper()}.pdb")
-    if (not os.path.exists(protonated_file)) or os.path.getsize(protonated_file) == 0 or force:
-        print(f"[INFO] Protonating PDB: {raw_pdb} -> {protonated_file}")
-        protonate(raw_pdb, protonated_file)
-    else:
-        print(f"[INFO] Using existing protonated PDB: {protonated_file}")
+    print(f"[INFO] Protonating PDB: {raw_pdb} -> {protonated_file}")
+    protonate(raw_pdb, protonated_file)
 
     pdb_filename = protonated_file
 

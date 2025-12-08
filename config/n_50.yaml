@@ -1,0 +1,67 @@
+exp: n_50
+
+# Default directories
+raw_pdb_dir: ./data/masif_ppi_search/n_50/raw_pdbs/
+pdb_chain_dir: ./data/masif_ppi_search/n_50/chain_pdbs/
+ply_chain_dir: ./data/masif_ppi_search/n_50/chain_surfaces/
+tmp_dir: ./tmp/
+ply_file_template: ./data/masif_ppi_search/n_50/chain_surfaces/{}_{}.ply
+
+# Surface features
+use_hbond: true
+use_hphob: true
+use_apbs: true
+compute_iface: true
+
+# Mesh resolution
+mesh_res: 1.0
+feature_interpolation: true
+
+# Coords params
+radius: 12.0
+
+# Neural network patch application specific parameters.
+ppi_search:
+  training_list: ./data/masif_ppi_search/lists/n_50_training.txt
+  testing_list: ./data/masif_ppi_search/lists/n_50_testing.txt
+  max_shape_size: 200
+  max_distance: 12.0
+  masif_precomputation_dir: ./data/masif_ppi_search/n_50/precomputation_12A/
+  feat_mask: [1.0, 1.0, 1.0, 1.0, 1.0]
+  max_sc_filt: 1.0
+  min_sc_filt: 0.5
+  pos_surf_accept_probability: 1.0
+  pos_interface_cutoff: 1.0
+  range_val_samples: 1.0
+  cache_dir: ./data/masif_ppi_search/n_50/nn_models/sc05/cache/
+  model_dir: ./data/masif_ppi_search/n_50/nn_models/sc05/all_feat/model_data/
+  desc_dir: ./data/masif_ppi_search/n_50/descriptors/sc05/all_feat/
+  gif_descriptors_out: ./data/masif_ppi_search/n_50/gif_descriptors/
+
+  # Parameters for shape complementarity calculations.
+  sc_radius: 12.0
+  sc_interaction_cutoff: 1.5
+  sc_w: 0.25
+
+  # Parameters for training
+  learning_rate: 0.0001
+  num_epochs: 10000
+  save_epoch: 100
+  batch_size: 32
+
+  # second stage alignment
+  data_dir: ""
+  K: 100
+  ransac_iter: 100000
+  num_success: 1000
+  method: "masif"
+  benchmark_list: ./data/masif_ppi_search/lists/n_50_testing.txt
+  PATCH_RADIUS: 9.0
+  out_base: ./data/masif_ppi_search/n_50/transformation_data/
+
+site:
+  training_list: ./data/masif_ppi_search/lists/n_50_training.txt
+  testing_list: ./data/masif_ppi_search/lists/n_50_testing.txt
+  max_shape_size: 100
+  max_distance: 9.0
+  masif_precomputation_dir: ./data/masif_ppi_search/n_50/precomputation_9A/

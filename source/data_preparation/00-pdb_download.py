@@ -2,9 +2,9 @@
 import os
 import argparse
 import yaml
-
 from Bio.PDB import PDBList
-from input_output.protonate import protonate
+
+from ..input_output.protonate import protonate
 
 
 def load_config(path: str) -> dict:

@@ -5,17 +5,15 @@ import argparse
 import warnings
 import numpy as np
 import yaml
-
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", category=FutureWarning)
 
-from masif_modules.read_data_from_surface import (
+from ..masif_modules.read_data_from_surface import (
     read_data_from_surface,
     compute_shape_complementarity,
 )
 
 np.random.seed(0)
-
 
 def load_config(path: str) -> dict:
     """Load YAML config and do a small amount of compatibility handling."""

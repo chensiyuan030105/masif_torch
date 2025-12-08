@@ -7,6 +7,8 @@ import os
 from IPython.core.debugger import set_trace
 from sklearn.metrics import accuracy_score, roc_auc_score
 import torch
+from tqdm import tqdm
+import math
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -72,6 +74,69 @@ def construct_batch(
     batch_mask = torch.cat([batch_mask_pos, batch_mask_binder, batch_mask_neg, batch_mask_neg_2], dim=0).unsqueeze(2)
 
     return batch_rho, batch_theta, batch_feat, batch_mask
+
+def construct_batch_val_test(
+    c_idx, rho, theta, feat, mask, flip=False
+):
+    batch_rho = rho[c_idx].unsqueeze(2)
+    batch_theta = theta[c_idx].unsqueeze(2)
+    batch_feat = feat[c_idx]
+    batch_mask = mask[c_idx].unsqueeze(2)
+    # Flip features and theta (except hydrophobicity)
+    if flip:
+        batch_feat = -batch_feat
+        batch_theta = 2 * np.pi - batch_theta
+        assert len(batch_feat.shape) == 3
+        # Hydrophobicity is not flipped. -- FIx this.
+        if batch_feat.shape[2] == 5 or batch_feat.shape[2] == 3:
+            batch_feat[:, :, -1] = -batch_feat[:, :, -1]
+
+    return batch_rho, batch_theta, batch_feat, batch_mask
+
+def compute_val_test_desc(
+    model,
+    idx,
+    rho,
+    theta,
+    feat,
+    mask,
+    batch_size=100,
+    flip=False,
+):  
+    with torch.no_grad():
+        model.eval()
+        all_descs = []
+        num_batches = (idx.numel() + batch_size - 1) // batch_size
+        # Compute all desc for positive shapes.
+        for kk in tqdm(range(num_batches)):
+            # idx: torch.Tensor, shape [N]
+            start = kk * batch_size
+            end = min((kk + 1) * batch_size, idx.numel())
+
+            pos = torch.arange(start, end, device=idx.device)
+            c_idx = idx.index_select(0, pos)
+
+            batch_rho, batch_theta, batch_feat, batch_mask = construct_batch_val_test(
+                c_idx, rho, theta, feat, mask, flip=flip
+            )
+
+            keep_prob = 0.5
+            desc, loss, score = model(
+                rho=batch_rho,
+                theta=batch_theta,
+                feat=batch_feat,
+                mask=batch_mask,
+                keep_prob=keep_prob
+            )
+            desc = desc.squeeze()
+            if desc.dim() == 1:
+                desc = desc.unsqueeze(0)
+            all_descs.append(desc)
+        if len(all_descs) > 1:
+            all_descs = torch.cat(all_descs, dim=0)
+        else:
+            all_descs = all_descs[0]
+        return all_descs
 
 def compute_dists(descs1, descs2):
     dists = np.sqrt(np.sum(np.square(descs1 - descs2), axis=1))
@@ -172,7 +237,7 @@ def train_ppi_search(
             # ---- per-step logging (x-axis = global_step) ----
             wandb.log(
                 {
-                    "train/loss_step": loss_val,
+                    "train/loss_step": math.log10(loss_val),
                     "epoch": epoch,
                     "step_in_epoch": step_in_epoch,
                     "global_step": global_step,
@@ -188,7 +253,7 @@ def train_ppi_search(
         if epoch_batches > 0:
             wandb.log(
                 {
-                    "train/loss_epoch": epoch_loss_sum / epoch_batches,
+                    "train/loss_epoch": math.log10(epoch_loss_sum / epoch_batches),
                     "epoch": epoch,
                     "global_step": global_step,  # optional, handy for reference
                 }
@@ -197,71 +262,72 @@ def train_ppi_search(
 
 
         if epoch % save_epoch == 0:
-            model.eval()
+            with torch.no_grad():
+                model.eval()
 
-            for batch in test_dataloader:
-                (binder_rho, binder_theta, binder_feat, binder_mask,
-                pos_rho, pos_theta, pos_feat, pos_mask,
-                neg_rho, neg_theta, neg_feat, neg_mask) = batch
-
-                # ---- to device ----
-                binder_rho   = binder_rho.to(device, non_blocking=True)
-                binder_theta = binder_theta.to(device, non_blocking=True)
-                binder_feat  = binder_feat.to(device, non_blocking=True)
-                binder_mask  = binder_mask.to(device, non_blocking=True)
-
-                pos_rho   = pos_rho.to(device, non_blocking=True)
-                pos_theta = pos_theta.to(device, non_blocking=True)
-                pos_feat  = pos_feat.to(device, non_blocking=True)
-                pos_mask  = pos_mask.to(device, non_blocking=True)
-
-                neg_rho   = neg_rho.to(device, non_blocking=True)
-                neg_theta = neg_theta.to(device, non_blocking=True)
-                neg_feat  = neg_feat.to(device, non_blocking=True)
-                neg_mask  = neg_mask.to(device, non_blocking=True)
-
-                batch_rho, batch_theta, batch_feat, batch_mask = construct_batch(
-                    binder_rho, binder_theta, binder_feat, binder_mask,
+                for batch in test_dataloader:
+                    (binder_rho, binder_theta, binder_feat, binder_mask,
                     pos_rho, pos_theta, pos_feat, pos_mask,
-                    neg_rho, neg_theta, neg_feat, neg_mask,
-                )
+                    neg_rho, neg_theta, neg_feat, neg_mask) = batch
 
-                keep_prob = 0.5
+                    # ---- to device ----
+                    binder_rho   = binder_rho.to(device, non_blocking=True)
+                    binder_theta = binder_theta.to(device, non_blocking=True)
+                    binder_feat  = binder_feat.to(device, non_blocking=True)
+                    binder_mask  = binder_mask.to(device, non_blocking=True)
 
-                desc, loss, score = model(
-                    rho=batch_rho,
-                    theta=batch_theta,
-                    feat=batch_feat,
-                    mask=batch_mask,
-                    keep_prob=keep_prob
-                )
+                    pos_rho   = pos_rho.to(device, non_blocking=True)
+                    pos_theta = pos_theta.to(device, non_blocking=True)
+                    pos_feat  = pos_feat.to(device, non_blocking=True)
+                    pos_mask  = pos_mask.to(device, non_blocking=True)
 
-                desc = desc.detach().cpu().numpy()
+                    neg_rho   = neg_rho.to(device, non_blocking=True)
+                    neg_theta = neg_theta.to(device, non_blocking=True)
+                    neg_feat  = neg_feat.to(device, non_blocking=True)
+                    neg_mask  = neg_mask.to(device, non_blocking=True)
 
-                n_patches = desc.shape[0] // 4
-                pos_desc = desc[0:n_patches]
-                binder_desc = desc[n_patches:2*n_patches]
-                neg_desc = desc[2*n_patches:3*n_patches]
-                neg_desc_2 = desc[3*n_patches:4*n_patches]
+                    batch_rho, batch_theta, batch_feat, batch_mask = construct_batch(
+                        binder_rho, binder_theta, binder_feat, binder_mask,
+                        pos_rho, pos_theta, pos_feat, pos_mask,
+                        neg_rho, neg_theta, neg_feat, neg_mask,
+                    )
 
-                # Compute val ROC AUC.
-                pos_dists = compute_dists(pos_desc, binder_desc)
-                neg_dists = compute_dists(neg_desc, neg_desc_2)
-                roc_auc = 1 - compute_roc_auc(pos_dists, neg_dists)
+                    keep_prob = 0.5
 
-                logfile.write("Iteration {} validation roc auc: {}\n".format(epoch, roc_auc))
-                logfile.write("Mean validation positive score: {} ".format(np.mean(pos_dists)))
-                logfile.write("Mean validation negative score: {} ".format(np.mean(neg_dists)))
-                logfile.flush()
+                    desc, loss, score = model(
+                        rho=batch_rho,
+                        theta=batch_theta,
+                        feat=batch_feat,
+                        mask=batch_mask,
+                        keep_prob=keep_prob
+                    )
 
-            logfile.write(">>> Saving model.\n")
-            print(">>> Saving model.")
+                    desc = desc.detach().cpu().numpy()
 
-            output_model = os.path.join(out_dir, f"model_epoch_{epoch}.pt")
-            torch.save(model.state_dict(), output_model)
-            msg = f">>> Epoch {epoch}: Saved model and test results.\n"
-            logfile.write(msg)
-            print(msg)
+                    n_patches = desc.shape[0] // 4
+                    pos_desc = desc[0:n_patches]
+                    binder_desc = desc[n_patches:2*n_patches]
+                    neg_desc = desc[2*n_patches:3*n_patches]
+                    neg_desc_2 = desc[3*n_patches:4*n_patches]
+
+                    # Compute val ROC AUC.
+                    pos_dists = compute_dists(pos_desc, binder_desc)
+                    neg_dists = compute_dists(neg_desc, neg_desc_2)
+                    roc_auc = 1 - compute_roc_auc(pos_dists, neg_dists)
+
+                    logfile.write("Iteration {} validation roc auc: {}\n".format(epoch, roc_auc))
+                    logfile.write("Mean validation positive score: {} ".format(np.mean(pos_dists)))
+                    logfile.write("Mean validation negative score: {} ".format(np.mean(neg_dists)))
+                    logfile.flush()
+
+                logfile.write(">>> Saving model.\n")
+                print(">>> Saving model.")
+
+                output_model = os.path.join(out_dir, f"model_epoch_{epoch}.pt")
+                torch.save(model.state_dict(), output_model)
+                msg = f">>> Epoch {epoch}: Saved model and test results.\n"
+                logfile.write(msg)
+                print(msg)
 
             model.train()
 

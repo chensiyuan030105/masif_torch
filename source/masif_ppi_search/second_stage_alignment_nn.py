@@ -3,96 +3,79 @@
 import sys
 import time
 import sklearn.metrics
-from geometry.open3d_import import *
 import numpy as np
 import os
-from alignment_utils_masif_search import compute_nn_score, rand_rotation_matrix, \
-        get_center_and_random_rotate, get_patch_geo, multidock, test_alignments, \
-       subsample_patch_coords 
-from transformation_training_data.score_nn import ScoreNN
 from scipy.spatial import cKDTree
 from Bio.PDB import *
 import copy
 import scipy.sparse as spio
-from default_config.masif_opts import masif_opts
 import sys
+import scipy.spatial
+import argparse
+import yaml
 
-"""
-second_stage_alignment_nn.py: Second stage alignment code for benchmarking MaSIF-search.
-                            This code benchmarks MaSIF-search by generating 3D alignments
-                            of the protein.
-                            The method consists of two stages: 
-                            (1) Read a database of MaSIF-search fingerprint descriptors for each overlapping patch, and find the top K decoys that are the most similar to the 
-                            target 
-                            (2) Align and score these patches:
-                                (2a) Use the RANSAC algorithm + the iterative closest point algorithm to align each patch
-                                (2b) Use a pre trained neural network to score the alignment.
-                            
-Pablo Gainza and Freyr Sverrisson - LPDI STI EPFL 2019
-Released under an Apache License 2.0
-"""
+from ..geometry.open3d_import import *
+from .alignment_utils_masif_search import (
+    get_center_and_random_rotate,
+    get_patch_geo,
+    multidock,
+    test_alignments,
+    subsample_patch_coords,
+)
 
+np.random.seed(0)
 
-# Start measuring the cpu clock time here. 
-# We will not count the time required to align the structures and verify the ground truth. 
-#               This time will be subtracted at the end.
-global_start_time = time.clock()
-global_ground_truth_time = 0.0
+def load_config(path: str) -> dict:
+    """Load YAML config and do a small amount of compatibility handling."""
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
 
-# Read the pre-trained neural network.
-nn_model = ScoreNN()
-print(sys.argv)
+    # Optional: expand "{exp}" placeholders if present
+    exp = cfg.get("exp")
+    if exp:
+        for k, v in list(cfg.items()):
+            if isinstance(v, str):
+                cfg[k] = v.replace("{exp}", str(exp))
+        if isinstance(cfg.get("ppi_search"), dict):
+            for k, v in list(cfg["ppi_search"].items()):
+                if isinstance(v, str):
+                    cfg["ppi_search"][k] = v.replace("{exp}", str(exp))
 
-if len(sys.argv) != 6 or (sys.argv[5] != "masif" and sys.argv[5] != "gif"):
-    print("Usage: {} data_dir K ransac_iter num_success gif|masif".format(sys.argv[0]))
-    print("data_dir: Location of data directory.")
-    print("K: Number of decoy descriptors per target")
-    print("ransac_iter: number of ransac iterations.")
-    print("num_success: true alignment within short list of size num_success")
-    sys.exit(1)
+    if "ppi_search" not in cfg or not cfg["ppi_search"]:
+        raise ValueError("Config missing required key: ppi_search")
+    return cfg
 
-data_dir = sys.argv[1]
-K = int(sys.argv[2])
-ransac_iter = int(sys.argv[3])
-num_success = int(sys.argv[4])
-method = sys.argv[5]
+parser = argparse.ArgumentParser(
+    description="Second-stage alignment benchmark for MaSIF-search"
+)
+parser.add_argument("-c", "--config", required=True, help="Path to YAML config file.")
+
+args = parser.parse_args()
+masif_opts = load_config(args.config)
+params = masif_opts["ppi_search"]
+
+data_dir       = params["data_dir"]
+K              = params["K"]
+ransac_iter    = params["ransac_iter"]
+num_success    = params["num_success"]
+method         = params["method"]
+benchmark_list = params["benchmark_list"]
 
 # Location of surface (ply) files. 
 surf_dir = os.path.join(data_dir, masif_opts["ply_chain_dir"])
-
-if method == "gif":
-    desc_dir = os.path.join(data_dir, masif_opts["ppi_search"]["gif_descriptors_out"])
-else:  # MaSIF
-    desc_dir = os.path.join(data_dir, masif_opts["ppi_search"]["desc_dir"])
+desc_dir = os.path.join(data_dir, masif_opts["ppi_search"]["desc_dir"])
 
 # Directory of pdb files (used to compute the ground truth).
 pdb_dir = os.path.join(data_dir, masif_opts["pdb_chain_dir"])
-precomp_dir = os.path.join(
-    data_dir, masif_opts["ppi_search"]["masif_precomputation_dir"]
-)
-precomp_dir_9A = os.path.join(
-    data_dir, masif_opts["site"]["masif_precomputation_dir"]
-)
+precomp_dir = os.path.join(data_dir, masif_opts["ppi_search"]["masif_precomputation_dir"])
+precomp_dir_9A = os.path.join(data_dir, masif_opts["site"]["masif_precomputation_dir"])
 
-# List of PDBID_CHAIN1_CHAIN2 ids that will be used in this benchmark. 
-benchmark_list = "../benchmark_list.txt"
-
-
-pdb_list = open(benchmark_list).readlines()[0:100]
+pdb_list = open(benchmark_list).readlines()
 pdb_list = [x.rstrip() for x in pdb_list]
-
-"""
-This is where the actual protocol starts. 
-"""
 
 # Read all surfaces.
 all_pc = []
 all_desc = []
-
-rand_list = np.copy(pdb_list)
-#np.random.seed(0)
-np.random.shuffle(rand_list)
-rand_list = rand_list[0:100]
 
 p2_descriptors_straight = []
 p2_point_clouds = []
@@ -101,32 +84,17 @@ p2_names = []
 
 # First we read in all the decoy 'binder' shapes. 
 # Read all of p2. p2 will have straight descriptors.
-for i, pdb in enumerate(rand_list):
+for i, pdb in enumerate(pdb_list):
     print("Loading patch coordinates for {}".format(pdb))
     pdb_id = pdb.split("_")[0]
     chains = pdb.split("_")[1:]
     # Descriptors for global matching.
-    p2_descriptors_straight.append(
-        np.load(os.path.join(desc_dir, pdb, "p2_desc_straight.npy"))
-    )
-
-    p2_point_clouds.append(
-        read_point_cloud(
-            os.path.join(surf_dir, "{}.ply".format(pdb_id + "_" + chains[1]))
-        )
-    )
-
+    p2_descriptors_straight.append(np.load(os.path.join(desc_dir, pdb, "p2_desc_straight.npy")))
+    p2_point_clouds.append(read_point_cloud(os.path.join(surf_dir, "{}.ply".format(pdb_id + "_" + chains[1]))))
     # Read patch coordinates. 
-
     pc = subsample_patch_coords(pdb, "p2", precomp_dir_9A)
     p2_patch_coords.append(pc)
-
     p2_names.append(pdb)
-
-
-import time
-import scipy.spatial
-
 
 all_positive_scores = []
 all_positive_rmsd = []
@@ -137,8 +105,7 @@ all_rankings_desc = []
 
 # Now go through each target (p1 in every case) and dock each 'decoy' binder to it. 
 # The target will have flipped (inverted) descriptors.
-for target_ix, target_pdb in enumerate(rand_list):
-    cycle_start_time = time.clock()
+for target_ix, target_pdb in enumerate(pdb_list):
     print('Docking all binders on target: {} '.format(target_pdb))
     target_pdb_id = target_pdb.split("_")[0]
     chains = target_pdb.split("_")[1:]
@@ -165,7 +132,7 @@ for target_ix, target_pdb in enumerate(rand_list):
     gt_dists = []
 
     # This is where the desriptors are actually compared (stage 1 of the MaSIF-search protocol)
-    for source_ix, source_pdb in enumerate(rand_list):
+    for source_ix, source_pdb in enumerate(pdb_list):
 
         source_desc = p2_descriptors_straight[source_ix]
 
@@ -234,7 +201,7 @@ for target_ix, target_pdb in enumerate(rand_list):
     neg_scores = []
 
     # This is where the matched descriptors are actually aligned.
-    for source_ix, source_pdb in enumerate(rand_list):
+    for source_ix, source_pdb in enumerate(pdb_list):
         viii = chosen_top[np.where(all_pdb_id[chosen_top] == source_pdb)[0]]
         source_vix = all_vix[viii]
 
@@ -258,13 +225,11 @@ for target_ix, target_pdb in enumerate(rand_list):
             target_patch,
             target_patch_descs,
             target_ckdtree,
-            nn_model, 
+            # nn_model,
             ransac_iter=ransac_iter
         )
         num_negs = num_negs
 
-        # If this is the source_pdb, get the ground truth. The ground truth evaluation time is ignored for this and all other methods. 
-        gt_start_time = time.clock()
         if source_pdb == target_pdb:
 
             for j, res in enumerate(all_results):
@@ -276,15 +241,16 @@ for target_ix, target_pdb in enumerate(rand_list):
                     target_atom_pcd_tree,
                     radius=0.5,
                 )
-                score = all_source_scores[j]
+                # score = all_source_scores[j]
                 if rmsd < 5.0 and res.fitness > 0:
                     rank_val = np.where(chosen_top == viii[j])[0][0]
                     pos_rmsd.append(rmsd)
                     found = True
                     myrank_desc = min(rank_val, myrank_desc)
-                    pos_scores.append(score)
+                    # pos_scores.append(score)
                 else:
-                    neg_scores.append(score)
+                    pass
+                    # neg_scores.append(score)
         else:
             for j in range(len(all_source_scores)):
                 score = all_source_scores[j]
@@ -293,37 +259,21 @@ for target_ix, target_pdb in enumerate(rand_list):
         count_found += 1
         all_rankings_desc.append(myrank_desc)
         print('Descriptor rank: {}'.format(myrank_desc))
-        print('Mean positive score: {}, mean negative score: {}'.format(np.mean(pos_scores), np.mean(neg_scores)))
-        max_pos_score = np.max(pos_scores)
-        rank = np.sum(neg_scores > max_pos_score)+1
-        print('Neural network rank: {}'.format(rank))
-        y_true = np.concatenate([np.zeros_like(pos_scores), np.ones_like(neg_scores)])
-        y_pred = np.concatenate([pos_scores, neg_scores])
-        auc = 1.0 - sklearn.metrics.roc_auc_score(y_true, y_pred)
-        print('ROC AUC (protein): {:.3f}'.format(auc))
+        # print('Mean positive score: {}, mean negative score: {}'.format(np.mean(pos_scores), np.mean(neg_scores)))
+        # max_pos_score = np.max(pos_scores)
+        # rank = np.sum(neg_scores > max_pos_score)+1
+        # print('Neural network rank: {}'.format(rank))
+        # y_true = np.concatenate([np.zeros_like(pos_scores), np.ones_like(neg_scores)])
+        # y_pred = np.concatenate([pos_scores, neg_scores])
+        # auc = 1.0 - sklearn.metrics.roc_auc_score(y_true, y_pred)
+        # print('ROC AUC (protein): {:.3f}'.format(auc))
     else:
         print("N/D")
-    gt_end_time = time.clock()
-    global_ground_truth_time += (gt_end_time - gt_start_time)
 
     all_positive_rmsd.append(pos_rmsd)
-    all_positive_scores.append(pos_scores)
-    all_negative_scores.append(neg_scores)
-    cycle_end_time = time.clock()
-    cycle_time = cycle_end_time-cycle_start_time - (gt_end_time - gt_start_time)
-    print("Cycle took {:.2f} cpu seconds (excluding ground truth time) ".format(cycle_time))
+    # all_positive_scores.append(pos_scores)
+    # all_negative_scores.append(neg_scores)
     # Go through every top descriptor.
-
-# We stop measuring the time at this point. 
-global_end_time = time.clock()
-
-# CPU time in minutes.
-global_cpu_time = global_end_time - global_start_time - global_ground_truth_time
-# Convert to minutes. 
-global_cpu_time = global_cpu_time/60
-
-print("All alignments took {} min".format(global_cpu_time))
-
 
 all_pos = []
 all_neg = []
@@ -391,7 +341,7 @@ meanrmsd = np.mean(rmsds)
 
 
 outline = "{},{},{},{},{},{},{},{},{},{}\n".format(
-    K, len(all_positive_scores), top2000, top1000, top100, top10, top5, top1, meanrmsd, global_cpu_time
+    K, len(all_positive_scores), top2000, top1000, top100, top10, top5, top1, meanrmsd
 )
 outfile.write(outline)
 

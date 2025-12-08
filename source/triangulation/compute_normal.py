@@ -7,7 +7,7 @@ This file is part of MaSIF, based on previous matlab code by Gabriel Peyre, conv
 """
 
 ###
-from default_config.global_vars import epsilon as eps
+from ..default_config.global_vars import epsilon as eps
 
 
 def compute_normal(vertex, face):

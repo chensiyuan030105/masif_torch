@@ -1,18 +1,18 @@
 #!/usr/bin/env python
 from IPython.core.debugger import set_trace
-# coding: utf-8
 import sys
 from open3d import *
-#import ipdb
 import numpy as np
 import os
 from sklearn.manifold import TSNE
 from Bio.PDB import *
 import copy
 import scipy.sparse as spio
-from default_config.masif_opts import masif_opts
 import sys
 from scipy.spatial import cKDTree
+import open3d
+
+from ...geometry.open3d_import import *
 
 """
 second_stage_transformation_training_helper.py: Helper functions for the second strage transformation data generation.
@@ -78,10 +78,10 @@ def get_patch_geo(pcd,patch_coords,center,descriptors, outward_shift=0.25, flip=
     pts = pts + outward_shift*nrmls
     if flip:
         nrmls = -np.asarray(pcd.normals)[idx,:]
-    patch = PointCloud()
-    patch.points = Vector3dVector(pts)
-    patch.normals = Vector3dVector(nrmls)
-    patch_descs = Feature()
+    patch = open3d.geometry.PointCloud()
+    patch.points = open3d.utility.Vector3dVector(pts)
+    patch.normals = open3d.utility.Vector3dVector(nrmls)
+    patch_descs = open3d.pipelines.registration.Feature()
     patch_descs.data = descriptors[idx,:].T
     return patch, patch_descs
 
@@ -97,7 +97,7 @@ def multidock(source_pcd,source_patch_coords,source_descs,cand_pts,target_pcd,ta
         except:
             set_trace()
         result = registration_ransac_based_on_feature_matching(
-            source_patch, target_pcd, source_patch_descs, target_descs,
+            source_patch, target_pcd, source_patch_descs, target_descs, True, 
             ransac_radius,
             TransformationEstimationPointToPoint(False), 3,
             [CorrespondenceCheckerBasedOnEdgeLength(0.9),

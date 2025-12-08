@@ -3,7 +3,8 @@ from IPython.core.debugger import set_trace
 import copy
 from Bio.PDB import *
 import os
-from geometry.open3d_import import *
+
+from ..geometry.open3d_import import *
 
 def compute_nn_score(
     target_ckdtree,
@@ -138,7 +139,7 @@ def multidock(
     target_pcd, # The target patch's point cloud
     target_descs, # The descriptors for the target patch
     target_ckdtree, # A kd-tree for the target patch for fast searches. 
-    nn_model, # The neural network model
+    nn_model=None, # The neural network model
     ransac_radius=1.0, # The radius fro RANSAC inliers.
     ransac_iter=2000,
     use_icp=True
@@ -166,6 +167,7 @@ def multidock(
             target_pcd,
             source_patch_descs,
             target_descs,
+            True,
             ransac_radius,
             TransformationEstimationPointToPoint(False),
             3,
@@ -186,16 +188,16 @@ def multidock(
         all_results.append(result)
         all_source_patch.append(source_patch)
 
-        # Compute the neural network score for each alignment.
-        source_scores = compute_nn_score(
-            target_ckdtree,
-            target_pcd, 
-            source_patch,
-            target_descs,
-            source_patch_descs,
-            nn_model
-        )
-        all_source_scores.append(source_scores)
+        # # Compute the neural network score for each alignment.
+        # source_scores = compute_nn_score(
+        #     target_ckdtree,
+        #     target_pcd, 
+        #     source_patch,
+        #     target_descs,
+        #     source_patch_descs,
+        #     nn_model
+        # )
+        # all_source_scores.append(source_scores)
 
     return all_results, all_source_patch, all_source_scores
 
@@ -298,13 +300,14 @@ def subsample_patch_coords(pdb, pid, precomp_dir, cv=None):
     """
 
     if cv is None:
-        pc = np.load(os.path.join(precomp_dir, pdb, pid+'_list_indices.npy'))
+        file_path = os.path.join(precomp_dir, pdb, pid+'_list_indices.npy')
+        print(f"Loading file from: {file_path}")
+        pc = np.load(file_path, allow_pickle=True)
     else:
         pc = {}
-        coords = np.load(os.path.join(precomp_dir, pdb, pid+'_list_indices.npy'))[cv]
+        coords = np.load(os.path.join(precomp_dir, pdb, pid+'_list_indices.npy'), allow_pickle=True)[cv]
         for iii, v in enumerate(cv):
             pc[v] = coords[iii]
-
 
     return pc
 

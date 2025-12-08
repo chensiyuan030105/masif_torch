@@ -9,7 +9,6 @@ import pymesh
 from IPython.core.debugger import set_trace
 from scipy.spatial import cKDTree
 
-
 """
 masif_ppi_search_cache_training_data.py: Function to cache all the training data for MaSIF-search. 
 This function extracts all the positive pairs and a random number of negative surfaces.
@@ -161,6 +160,7 @@ def main():
         contact_points = np.where(d < params["pos_interface_cutoff"])[0]
         try:
             k1 = l[contact_points]
+            print("k1 =", k1)
         except Exception:
             set_trace()
         k2 = r[contact_points]

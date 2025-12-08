@@ -1,82 +1,111 @@
-import tensorflow as tf
-import numpy.matlib 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+import logging
 import os
-import numpy as np
-from IPython.core.debugger import set_trace
-from scipy.spatial import cKDTree
-from sklearn.metrics import roc_auc_score
-from tensorflow import keras
-import time
-#import pandas as pd
-import pickle
-import sys
 
-"""
-score_nn.py: Class to score protein complex alignments based on a pre-trained neural network (used for MaSIF-search's second stage protocol).
-Freyr Sverrisson and Pablo Gainza - LPDI STI EPFL 2019
-Released under an Apache License 2.0
-"""
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-class ScoreNN:
+class ScoreNN(nn.Module):
+    def __init__(self, device='cuda'):
+        super(ScoreNN, self).__init__()
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
 
-    def __init__(self):
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        session = tf.Session(config=config)
+        # Define layers
+        self.conv1 = nn.Conv1d(3, 8, kernel_size=1)
+        self.bn1 = nn.BatchNorm1d(8)
+        self.conv2 = nn.Conv1d(8, 16, kernel_size=1)
+        self.bn2 = nn.BatchNorm1d(16)
+        self.conv3 = nn.Conv1d(16, 32, kernel_size=1)
+        self.bn3 = nn.BatchNorm1d(32)
+        self.conv4 = nn.Conv1d(32, 64, kernel_size=1)
+        self.bn4 = nn.BatchNorm1d(64)
+        self.conv5 = nn.Conv1d(64, 128, kernel_size=1)
+        self.bn5 = nn.BatchNorm1d(128)
+        self.conv6 = nn.Conv1d(128, 256, kernel_size=1)
+        self.bn6 = nn.BatchNorm1d(256)
 
-        np.random.seed(42)
-        tf.random.set_random_seed(42)
+        # Fully connected layers
+        self.fc1 = nn.Linear(256, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 32)
+        self.fc4 = nn.Linear(32, 16)
+        self.fc5 = nn.Linear(16, 8)
+        self.fc6 = nn.Linear(8, 4)
+        self.fc7 = nn.Linear(4, 2)
 
-        reg = keras.regularizers.l2(l=0.0)
-        model = keras.models.Sequential()
+        self.to(self.device)
 
-        model.add(keras.layers.Conv1D(filters=8,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=16,kernel_size=1,strides=1, input_shape=(200,3)))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=32,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=64,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=128,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.Conv1D(filters=256,kernel_size=1,strides=1))
-        model.add(keras.layers.BatchNormalization())
-        model.add(keras.layers.ReLU())
-        model.add(keras.layers.GlobalAveragePooling1D())
-        model.add(keras.layers.Dense(128,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(64,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(32,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(16,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(8,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(4,activation=tf.nn.relu,kernel_regularizer=reg))
-        model.add(keras.layers.Dense(2, activation='softmax'))
+    def forward(self, x):
+        # x shape: (batch_size, n_points, n_features) => (batch_size, 3, 200) after transpose
+        x = x.transpose(1, 2).to(self.device).float()  # Conv1d expects (B, C, L)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn4(self.conv4(x)))
+        x = F.relu(self.bn5(self.conv5(x)))
+        x = F.relu(self.bn6(self.conv6(x)))
 
-        opt = keras.optimizers.Adam(lr=1e-4)
-        model.compile(optimizer=opt,loss='sparse_categorical_crossentropy',metrics=['accuracy'])
+        x = torch.mean(x, dim=2)  # GlobalAveragePooling1D
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        x = F.relu(self.fc4(x))
+        x = F.relu(self.fc5(x))
+        x = F.relu(self.fc6(x))
+        x = F.softmax(self.fc7(x), dim=1)
+        return x
 
-        self.model = model
-        self.restore_model()
+    def print_layer_weights(self):
+        logging.info("Printing model layer weights...")
+        for name, param in self.named_parameters():
+            logging.info(f"{name}: shape={param.shape}")
 
-    def restore_model(self):
-        self.model.load_weights('models/nn_score/trained_model.hdf5')
+    def restore_model(self, path):
+        """Restore weights from a saved PyTorch checkpoint (.pt or .pth)"""
+        if os.path.exists(path):
+            self.load_state_dict(torch.load(path, map_location=self.device))
+            logging.info(f"Model weights restored from {path}")
+            self.print_layer_weights()
+        else:
+            logging.warning(f"Checkpoint {path} not found. Model initialized randomly.")
 
-    def train_model(self, features, labels, n_negatives, n_positives):
-        callbacks = [
-            keras.callbacks.ModelCheckpoint(filepath='models/nn_score/{}.hdf5'.format('trained_model'),save_best_only=True,monitor='val_loss',save_weights_only=True),\
-            keras.callbacks.TensorBoard(log_dir='./logs/nn_score',write_graph=False,write_images=True)\
-        ]
-        history = self.model.fit(features,labels,batch_size=32,epochs=50,validation_split=0.1,shuffle=True, class_weight={0:1.0/n_negatives,1:1.0/n_positives}, callbacks=callbacks)
+    def train_model(self, features, labels, n_negatives, n_positives, epochs=50, batch_size=32, lr=1e-4):
+        features = torch.tensor(features, dtype=torch.float32)
+        labels = torch.tensor(labels, dtype=torch.long)
+        dataset = TensorDataset(features, labels)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
+        # Compute class weights
+        class_weights = torch.tensor([1.0/n_negatives, 1.0/n_positives], dtype=torch.float32).to(self.device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
 
-    def eval(self, features):
-        #set_trace()
-        y_test_pred = self.model.predict(features)
-        return y_test_pred
+        self.train()
+        for epoch in range(epochs):
+            epoch_loss = 0.0
+            for batch_features, batch_labels in loader:
+                batch_features = batch_features.to(self.device)
+                batch_labels = batch_labels.to(self.device)
+
+                optimizer.zero_grad()
+                outputs = self.forward(batch_features)
+                loss = criterion(outputs, batch_labels)
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item() * batch_features.size(0)
+
+            avg_loss = epoch_loss / len(dataset)
+            logging.info(f"Epoch {epoch+1}/{epochs}, Training Loss: {avg_loss:.6f}")
+
+    def eval_model(self, features):
+        self.eval()
+        features = torch.tensor(features, dtype=torch.float32).to(self.device)
+        with torch.no_grad():
+            outputs = self.forward(features)
+        return outputs.cpu().numpy()
 
 

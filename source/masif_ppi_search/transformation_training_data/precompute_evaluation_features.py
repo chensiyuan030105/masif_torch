@@ -1,9 +1,7 @@
 import os
-# import dask
 import numpy as np
 from scipy.spatial import cKDTree
 import glob
-from default_config.masif_opts import masif_opts
 
 """
 precompute_evaluation_features.py: Precompute the features for the actual training from the 'decoy' transformations.

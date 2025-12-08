@@ -1,5 +1,6 @@
 from Bio.PDB import *
-from default_config.chemistry import radii, polarHydrogens
+
+from ..default_config.chemistry import radii, polarHydrogens
 
 """
 xyzrn.py: Read a pdb file and output it is in xyzrn for use in MSMS

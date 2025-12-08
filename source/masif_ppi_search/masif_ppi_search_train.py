@@ -13,9 +13,9 @@ import torch.optim as optim
 import wandb
 from torch.utils.data import DataLoader
 
-from masif_modules.MaSIF_ppi_search import MaSIF_ppi_search
-from masif_modules.train_ppi_search import train_ppi_search
-from masif_modules.dataloader import PpiSearchCachedDataset
+from ..masif_modules.MaSIF_ppi_search import MaSIF_ppi_search
+from ..masif_modules.train_ppi_search import train_ppi_search
+from ..masif_modules.dataloader import PpiSearchCachedDataset
 
 
 def load_config(path: str) -> dict:

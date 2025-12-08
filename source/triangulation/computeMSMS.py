@@ -1,18 +1,17 @@
 import os
 from subprocess import Popen, PIPE
-
-from input_output.read_msms import read_msms
-from triangulation.xyzrn import output_pdb_as_xyzrn
-from default_config.global_vars import msms_bin 
-from default_config.masif_opts import masif_opts
 import random
+
+from ..default_config.global_vars import msms_bin 
+from .xyzrn import output_pdb_as_xyzrn
+from ..input_output.read_msms import read_msms
 
 # Pablo Gainza LPDI EPFL 2017-2019
 # Calls MSMS and returns the vertices.
 # Special atoms are atoms with a reduced radius.
 def computeMSMS(pdb_file,  protonate=True):
     randnum = random.randint(1,10000000)
-    file_base = masif_opts['tmp_dir']+"/msms_"+str(randnum)
+    file_base = "./tmp/msms_" + str(randnum)
     out_xyzrn = file_base+".xyzrn"
 
     if protonate:        

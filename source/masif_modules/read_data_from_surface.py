@@ -4,12 +4,10 @@ from IPython.core.debugger import set_trace
 import pymesh
 import time
 import numpy as np
-
-from geometry.compute_polar_coordinates import compute_polar_coordinates
-from input_output.save_ply import save_ply
-
 from sklearn import metrics
 
+from ..geometry.compute_polar_coordinates import compute_polar_coordinates
+from ..input_output.save_ply import save_ply
 
 def read_data_from_surface(ply_fn, params):
     """
